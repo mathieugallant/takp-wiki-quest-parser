@@ -12,13 +12,20 @@ export interface QuestReward {
   exp: number;
 }
 
+export interface TriggerItem {
+  /** item ID to turn in */
+  item_id: number;
+  /** how many of this item are required */
+  count: number;
+}
+
 export interface Interaction {
   /** event function this interaction belongs to, e.g. 'event_say', 'event_trade' */
   event: string;
   /** player keywords that trigger this branch (from message:findi) */
   trigger_keywords: string[];
-  /** item IDs the player must turn in to trigger this branch (from check_turn_in) */
-  trigger_items: number[];
+  /** items the player must turn in to trigger this branch (from check_turn_in), with required count */
+  trigger_items: TriggerItem[];
   /** minimum faction value required, or null if not gated */
   faction_required: number | null;
   /** NPC dialog lines on success (or unconditional) */

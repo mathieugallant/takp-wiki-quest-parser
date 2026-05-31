@@ -1,4 +1,4 @@
-import type { QuestData, Interaction, FactionChange, QuestReward } from './types.js';
+import type { QuestData, Interaction, FactionChange, QuestReward, TriggerItem } from './types.js';
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -89,20 +89,25 @@ const RE_NPC_SPAWN     = /eq\.(?:spawn2|unique_spawn|quest_entity)\s*\(\s*(\d{3,
 const RE_SPELL         = /CastSpell\s*\(\s*(\d{1,6})/g;
 const RE_FACTION       = /Faction\s*\(\s*[^,]+,\s*(\d{1,6})/g;
 
-function extractCheckTurnInItems(src: string): number[] {
-  const ids: number[] = [];
+/** Returns counted TriggerItem[] for use in interactions (preserves duplicate counts). */
+function extractCheckTurnInItems(src: string): TriggerItem[] {
+  const counts = new Map<number, number>();
   const tableRe = new RegExp(RE_CHECK_TURN_IN.source, 'g');
   let m: RegExpExecArray | null;
   while ((m = tableRe.exec(src)) !== null) {
-    const tableContents = m[1];
     const itemRe = /item\d+\s*=\s*(\d+)/g;
     let item: RegExpExecArray | null;
-    while ((item = itemRe.exec(tableContents)) !== null) {
+    while ((item = itemRe.exec(m[1])) !== null) {
       const id = parseInt(item[1], 10);
-      if (!isNaN(id)) ids.push(id);
+      if (!isNaN(id)) counts.set(id, (counts.get(id) ?? 0) + 1);
     }
   }
-  return ids;
+  return [...counts.entries()].map(([item_id, count]) => ({ item_id, count }));
+}
+
+/** Flat unique item IDs — used only for the QuestData summary arrays. */
+function extractCheckTurnInItemIds(src: string): number[] {
+  return extractCheckTurnInItems(src).map((t) => t.item_id);
 }
 
 // ─── Block parser ─────────────────────────────────────────────────────────────
@@ -250,10 +255,12 @@ function buildInteraction(event: string, condition: string, body: string): Inter
   );
   // check_turn_in may be in the condition (inline: faction AND check_turn_in)
   // or nested inside the body (outer faction gate wraps inner check_turn_in).
-  const trigger_items = unique([
-    ...extractCheckTurnInItems(condition),
-    ...extractCheckTurnInItems(body),
-  ]);
+  // Merge counts from both locations.
+  const itemCountMap = new Map<number, number>();
+  for (const t of [...extractCheckTurnInItems(condition), ...extractCheckTurnInItems(body)]) {
+    itemCountMap.set(t.item_id, Math.max(itemCountMap.get(t.item_id) ?? 0, t.count));
+  }
+  const trigger_items: TriggerItem[] = [...itemCountMap.entries()].map(([item_id, count]) => ({ item_id, count }));
 
   let faction_required = factionReqFrom(condition);
   let successBody = body;
@@ -354,7 +361,7 @@ export function parseLuaQuest(
   const dialogs           = dialogsFrom(src);
   const items_required    = unique([
     ...extractInts(new RegExp(RE_ITEM_REQ.source), src),
-    ...extractCheckTurnInItems(src),
+    ...extractCheckTurnInItemIds(src),
   ]);
   const items_rewarded    = unique([
     ...extractInts(new RegExp(RE_ITEM_SUMMON.source), src),
