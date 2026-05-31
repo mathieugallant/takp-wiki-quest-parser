@@ -45,13 +45,22 @@ const RE_KEYWORD_EQ = /message\s*==\s*["']([^"']+)["']/g;
 // NPC dialog: e.self:Say(...)  e.self:Emote(...)  eq.say(...)
 const RE_DIALOG = /(?:self:(?:Say|Emote|Shout|Roar|QuestSay)|eq\.say)\s*\(\s*["']([^"']+)["']/g;
 
-// Item required: HasItem(id)  CheckHandin  e.other:HasItem(id)
+// Item required: HasItem(id)  CheckHandin  handin_check
 const RE_ITEM_REQ =
   /(?:HasItem|CheckHandin|handin_check)\s*\(\s*(?:[^,)]*,\s*)?(\d{4,6})/g;
 
-// Item rewarded: SummonCursorItem(id)  AddItem(id)  QuestReward(id,...)
-const RE_ITEM_REWARD =
-  /(?:SummonCursorItem|AddItem|QuestReward)\s*\(\s*(\d{4,6})/g;
+// Items required via check_turn_in(npc, trade, {item1=N, item2=N, ...})
+// Handled by extractCheckTurnInItems() below — table contents need two-pass extraction.
+const RE_CHECK_TURN_IN = /check_turn_in\s*\([^{]*\{([^}]*)\}/g;
+
+// Item rewarded: SummonCursorItem(id)  AddItem(id)  — first arg is item id
+const RE_ITEM_SUMMON =
+  /(?:SummonCursorItem|AddItem)\s*\(\s*(\d{4,6})/g;
+
+// Item rewarded via QuestReward(npc, copper, silver, gold, platinum, item_id, exp)
+// Skip the npc ref (non-comma chars) and four coin values to reach item_id (arg 6).
+const RE_QUEST_REWARD =
+  /QuestReward\s*\(\s*[^,]+,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*(\d{4,6})/g;
 
 // NPC spawn: eq.spawn2(id,...)  eq.unique_spawn(id,...)
 const RE_NPC_SPAWN =
@@ -62,6 +71,22 @@ const RE_SPELL = /CastSpell\s*\(\s*(\d{1,6})/g;
 
 // Faction: Faction(e.self, id, delta)
 const RE_FACTION = /Faction\s*\(\s*[^,]+,\s*(\d{1,6})/g;
+
+function extractCheckTurnInItems(src: string): number[] {
+  const ids: number[] = [];
+  const tableRe = new RegExp(RE_CHECK_TURN_IN.source, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = tableRe.exec(src)) !== null) {
+    const tableContents = m[1];
+    const itemRe = /item\d+\s*=\s*(\d+)/g;
+    let item: RegExpExecArray | null;
+    while ((item = itemRe.exec(tableContents)) !== null) {
+      const id = parseInt(item[1], 10);
+      if (!isNaN(id)) ids.push(id);
+    }
+  }
+  return ids;
+}
 
 // ──────────────────────────────────────────────
 // Parser
@@ -90,8 +115,8 @@ export function parseLuaQuest(
     matchedLines += matched.size;
   }
 
-  [RE_KEYWORD_FINDI, RE_KEYWORD_EQ, RE_DIALOG, RE_ITEM_REQ, RE_ITEM_REWARD,
-   RE_NPC_SPAWN, RE_SPELL, RE_FACTION].forEach(countMatches);
+  [RE_KEYWORD_FINDI, RE_KEYWORD_EQ, RE_DIALOG, RE_ITEM_REQ, RE_CHECK_TURN_IN,
+   RE_ITEM_SUMMON, RE_QUEST_REWARD, RE_NPC_SPAWN, RE_SPELL, RE_FACTION].forEach(countMatches);
 
   const events = unique(extractStrings(new RegExp(RE_EVENT.source), src));
   const keywords = unique([
@@ -99,8 +124,14 @@ export function parseLuaQuest(
     ...extractStrings(new RegExp(RE_KEYWORD_EQ.source), src),
   ]).map((k) => k.toLowerCase());
   const dialogs = unique(extractStrings(new RegExp(RE_DIALOG.source), src));
-  const items_required = unique(extractInts(new RegExp(RE_ITEM_REQ.source), src));
-  const items_rewarded = unique(extractInts(new RegExp(RE_ITEM_REWARD.source), src));
+  const items_required = unique([
+    ...extractInts(new RegExp(RE_ITEM_REQ.source), src),
+    ...extractCheckTurnInItems(src),
+  ]);
+  const items_rewarded = unique([
+    ...extractInts(new RegExp(RE_ITEM_SUMMON.source), src),
+    ...extractInts(new RegExp(RE_QUEST_REWARD.source), src),
+  ]);
   const npcs_spawned = unique(extractInts(new RegExp(RE_NPC_SPAWN.source), src));
   const spells_cast = unique(extractInts(new RegExp(RE_SPELL.source), src));
   const factions_modified = unique(extractInts(new RegExp(RE_FACTION.source), src));
