@@ -218,8 +218,9 @@ function factionChangesFrom(src: string): FactionChange[] {
 
 function rewardsFrom(src: string): QuestReward[] {
   const rewards: QuestReward[] = [];
-  // Positional form: QuestReward(npc, copper, silver, gold, platinum, item_id, exp)
-  const re = /QuestReward\s*\(\s*[^,]+,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
+  // Positional form: QuestReward(npc, copper, silver, gold, platinum, item_id[, exp])
+  // exp is optional — many quest files omit it
+  const re = /QuestReward\s*\(\s*[^,]+,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     const itemId = parseInt(m[5], 10);
@@ -229,7 +230,7 @@ function rewardsFrom(src: string): QuestReward[] {
       gold:     parseInt(m[3], 10),
       platinum: parseInt(m[4], 10),
       item_id:  itemId > 0 ? itemId : null,
-      exp:      parseInt(m[6], 10),
+      exp:      m[6] ? parseInt(m[6], 10) : 0,
     });
   }
   // Table form: QuestReward(npc, {items = {id1, id2, ...}})
@@ -318,17 +319,43 @@ function extractInteractions(src: string): Interaction[] {
     fnStarts.push({ name: fm[1], start: fm.index });
   }
 
-  for (let i = 0; i < fnStarts.length; i++) {
-    const { name, start } = fnStarts[i];
-    const end = fnStarts[i + 1]?.start ?? src.length;
+  /**
+   * Recursively process branches.
+   * - __else__ branches are recursed into (not skipped) so default-hail etc. are captured.
+   * - Outer-gate branches whose conditions contain no keyword/check_turn_in trigger
+   *   (e.g. HasItem, faction checks) are recursed into so nested keyword branches
+   *   each produce their own interaction with correct trigger words.
+   */
+  function processBranches(event: string, branches: RawBranch[]): void {
+    for (const branch of branches) {
+      if (branch.condition === '__else__') {
+        const sub = extractBranches(branch.body);
+        if (sub.length > 0) processBranches(event, sub);
+        continue;
+      }
 
-    for (const branch of extractBranches(src.slice(start, end))) {
-      if (branch.condition === '__else__') continue;
-      const ia = buildInteraction(name, branch.condition, branch.body);
+      const condHasKeyword =
+        /message:find[iI]?\s*\(\s*["']/.test(branch.condition) ||
+        /message\s*==\s*["']/.test(branch.condition);
+      const condHasCheckTurnIn = /check_turn_in/.test(branch.condition);
+
+      if (!condHasKeyword && !condHasCheckTurnIn) {
+        // Outer gate (HasItem, faction, etc.) — recurse into body for nested branches
+        const sub = extractBranches(branch.body);
+        if (sub.length > 0) { processBranches(event, sub); continue; }
+      }
+
+      const ia = buildInteraction(event, branch.condition, branch.body);
       if (ia.trigger_keywords.length || ia.trigger_items.length || ia.responses.length) {
         interactions.push(ia);
       }
     }
+  }
+
+  for (let i = 0; i < fnStarts.length; i++) {
+    const { name, start } = fnStarts[i];
+    const end = fnStarts[i + 1]?.start ?? src.length;
+    processBranches(name, extractBranches(src.slice(start, end)));
   }
 
   return interactions;
