@@ -235,9 +235,47 @@ function extractCallArg(src: string, openParenEnd: number): string {
  *
  * `"Greetings " .. e.other:GetCleanName() .. "!"` → `"Greetings {name}!"`
  */
+/**
+ * Split a Lua concatenation expression on `..` operators that appear OUTSIDE
+ * of string literals.  A plain `.split(/\.\./)` incorrectly splits on `..`
+ * that appear inside a quoted string (e.g. "Gold.. 3250 coins"), causing the
+ * surrounding text to be silently dropped.
+ */
+function splitLuaConcats(expr: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let i = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (ch === '"' || ch === "'") {
+      // Scan to closing quote, respecting backslash escapes
+      const q = ch;
+      current += ch;
+      i++;
+      while (i < expr.length && expr[i] !== q) {
+        if (expr[i] === '\\') current += expr[i++];
+        current += expr[i++];
+      }
+      if (i < expr.length) current += expr[i++]; // closing quote
+    } else if (
+      ch === '.' &&
+      i + 1 < expr.length && expr[i + 1] === '.' &&
+      (i + 2 >= expr.length || expr[i + 2] !== '.') // not `...`
+    ) {
+      parts.push(current.trim());
+      current = '';
+      i += 2;
+    } else {
+      current += ch;
+      i++;
+    }
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
 function resolveLuaString(expr: string): string {
-  return expr
-    .split(/\s*\.\.\s*/)
+  return splitLuaConcats(expr)
     .map((part) => {
       part = part.trim();
       const dq = part.match(/^"((?:[^"\\]|\\.)*)"$/);
