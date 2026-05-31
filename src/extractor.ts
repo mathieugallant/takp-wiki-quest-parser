@@ -248,7 +248,12 @@ function buildInteraction(event: string, condition: string, body: string): Inter
       .concat(extractStrings(new RegExp(RE_KEYWORD_EQ.source), condition))
       .map((k) => k.toLowerCase()),
   );
-  const trigger_items = unique(extractCheckTurnInItems(condition));
+  // check_turn_in may be in the condition (inline: faction AND check_turn_in)
+  // or nested inside the body (outer faction gate wraps inner check_turn_in).
+  const trigger_items = unique([
+    ...extractCheckTurnInItems(condition),
+    ...extractCheckTurnInItems(body),
+  ]);
 
   let faction_required = factionReqFrom(condition);
   let successBody = body;
