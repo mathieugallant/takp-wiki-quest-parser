@@ -195,12 +195,71 @@ function extractBranches(src: string): RawBranch[] {
 
 // ─── Structured extraction helpers ───────────────────────────────────────────
 
+/**
+ * Walk `src` from `openParenEnd` (the index right after the opening `(` of a
+ * Say/Emote call) and return the raw argument expression, respecting paren
+ * depth and skipping over Lua string literals so inner parens don't confuse
+ * the depth counter.
+ */
+function extractCallArg(src: string, openParenEnd: number): string {
+  let depth = 1;
+  let i = openParenEnd;
+  while (i < src.length && depth > 0) {
+    const ch = src[i];
+    if (ch === '"') {
+      i++;
+      while (i < src.length && src[i] !== '"') {
+        if (src[i] === '\\') i++;
+        i++;
+      }
+    } else if (ch === "'") {
+      i++;
+      while (i < src.length && src[i] !== "'") {
+        if (src[i] === '\\') i++;
+        i++;
+      }
+    } else if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      depth--;
+      if (depth === 0) break;
+    }
+    i++;
+  }
+  return src.slice(openParenEnd, i).trim();
+}
+
+/**
+ * Resolve a Lua string-concatenation expression to plain text, replacing
+ * known dynamic interpolations with human-readable placeholders.
+ *
+ * `"Greetings " .. e.other:GetCleanName() .. "!"` → `"Greetings {name}!"`
+ */
+function resolveLuaString(expr: string): string {
+  return expr
+    .split(/\s*\.\.\s*/)
+    .map((part) => {
+      part = part.trim();
+      const dq = part.match(/^"((?:[^"\\]|\\.)*)"$/);
+      if (dq) return dq[1];
+      const sq = part.match(/^'((?:[^'\\]|\\.)*)'$/);
+      if (sq) return sq[1];
+      if (/(?:GetCleanName|GetName)\s*\(/.test(part)) return '{name}';
+      if (/GetLevel\s*\(/.test(part)) return '{level}';
+      if (/GetClass\s*\(/.test(part)) return '{class}';
+      if (/GetRace\s*\(/.test(part)) return '{race}';
+      return '';
+    })
+    .join('');
+}
+
 function dialogsFrom(src: string): string[] {
   const strings: string[] = [];
-  const re = new RegExp(RE_DIALOG.source, 'g');
+  const re = /(?:self:(?:Say|Emote|Shout|Roar|QuestSay)|eq\.say)\s*\(/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
-    const text = (m[1] ?? m[2] ?? '').trim();
+    const arg = extractCallArg(src, m.index + m[0].length);
+    const text = resolveLuaString(arg).trim();
     if (text) strings.push(text);
   }
   return unique(strings);
