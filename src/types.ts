@@ -8,7 +8,10 @@ export interface QuestReward {
   silver: number;
   gold: number;
   platinum: number;
+  /** A single rewarded item, or null when item_choices is set. */
   item_id: number | null;
+  /** When the quest uses eq.ChooseRandom(), exactly one of these items is awarded at random. */
+  item_choices: number[] | null;
   exp: number;
 }
 

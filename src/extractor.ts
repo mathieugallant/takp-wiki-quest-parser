@@ -312,33 +312,100 @@ function factionChangesFrom(src: string): FactionChange[] {
   }
   return changes;
 }
+/**
+ * Split a comma-separated argument string into individual argument expressions,
+ * respecting nested parentheses, brackets, and string literals so commas
+ * inside nested calls (e.g. eq.ChooseRandom(a, b, c)) are not treated as
+ * argument separators.
+ */
+function splitCallArgs(args: string): string[] {
+  const result: string[] = [];
+  let depth = 0;
+  let current = '';
+  let i = 0;
+  while (i < args.length) {
+    const ch = args[i];
+    if (ch === '"' || ch === "'") {
+      const q = ch;
+      current += ch;
+      i++;
+      while (i < args.length && args[i] !== q) {
+        if (args[i] === '\\') current += args[i++];
+        current += args[i++];
+      }
+      if (i < args.length) { current += args[i++]; continue; }
+    } else if (ch === '(' || ch === '[' || ch === '{') {
+      depth++;
+      current += ch;
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      depth--;
+      current += ch;
+    } else if (ch === ',' && depth === 0) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+    i++;
+  }
+  if (current.trim()) result.push(current.trim());
+  return result;
+}
 
 function rewardsFrom(src: string): QuestReward[] {
   const rewards: QuestReward[] = [];
-  // Positional form: QuestReward(npc, copper, silver, gold, platinum, item_id[, exp])
-  // exp is optional — many quest files omit it
-  const re = /QuestReward\s*\(\s*[^,]+,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?/g;
+
+  const callRe = /QuestReward\s*\(/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(src)) !== null) {
-    const itemId = parseInt(m[5], 10);
-    rewards.push({
-      copper:   parseInt(m[1], 10),
-      silver:   parseInt(m[2], 10),
-      gold:     parseInt(m[3], 10),
-      platinum: parseInt(m[4], 10),
-      item_id:  itemId > 0 ? itemId : null,
-      exp:      m[6] ? parseInt(m[6], 10) : 0,
-    });
-  }
-  // Table form: QuestReward(npc, {items = {id1, id2, ...}})
-  const tableRe = new RegExp(RE_QUEST_REWARD_TABLE.source, 'g');
-  while ((m = tableRe.exec(src)) !== null) {
-    const itemRe = /(\d{4,6})/g;
-    let item: RegExpExecArray | null;
-    while ((item = itemRe.exec(m[1])) !== null) {
-      rewards.push({ copper: 0, silver: 0, gold: 0, platinum: 0, item_id: parseInt(item[1], 10), exp: 0 });
+  while ((m = callRe.exec(src)) !== null) {
+    const argsStr = extractCallArg(src, m.index + m[0].length);
+    const args = splitCallArgs(argsStr);
+    // args: [npc, copper, silver, gold, platinum, item, exp?]
+    if (args.length < 2) continue;
+
+    function toInt(s: string | undefined): number {
+      if (!s) return 0;
+      const n = parseInt(s.trim(), 10);
+      return isNaN(n) ? 0 : n;
+    }
+
+    // Table form: QuestReward(npc, {items = {...}})
+    if (args.length === 2 && args[1].startsWith('{')) {
+      const itemRe = /(\d{4,6})/g;
+      let it: RegExpExecArray | null;
+      while ((it = itemRe.exec(args[1])) !== null) {
+        rewards.push({ copper: 0, silver: 0, gold: 0, platinum: 0, item_id: parseInt(it[1], 10), item_choices: null, exp: 0 });
+      }
+      continue;
+    }
+
+    const copper   = toInt(args[1]);
+    const silver   = toInt(args[2]);
+    const gold     = toInt(args[3]);
+    const platinum = toInt(args[4]);
+    const exp      = toInt(args[6]);
+
+    const itemArg = args[5]?.trim() ?? '';
+
+    // eq.ChooseRandom(id1, id2, ...) — one item awarded at random
+    const chooseMatch = itemArg.match(/eq\.ChooseRandom\s*\(([^)]+)\)/);
+    if (chooseMatch) {
+      const choices = chooseMatch[1]
+        .split(',')
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !isNaN(n) && n > 0);
+      rewards.push({ copper, silver, gold, platinum, item_id: null, item_choices: choices.length > 0 ? choices : null, exp });
+    } else {
+      const itemId = parseInt(itemArg, 10);
+      rewards.push({
+        copper, silver, gold, platinum,
+        item_id: !isNaN(itemId) && itemId > 0 ? itemId : null,
+        item_choices: null,
+        exp,
+      });
     }
   }
+
   return rewards;
 }
 
@@ -511,8 +578,12 @@ export function parseLuaQuest(
   ]);
   const items_rewarded    = unique([
     ...extractInts(new RegExp(RE_ITEM_SUMMON.source), src),
-    ...extractInts(new RegExp(RE_QUEST_REWARD.source), src),
-    ...rewardsFrom(src).filter(r => r.item_id !== null).map(r => r.item_id as number),
+    ...rewardsFrom(src).flatMap((r) => {
+      const ids: number[] = [];
+      if (r.item_id !== null) ids.push(r.item_id);
+      if (r.item_choices) ids.push(...r.item_choices);
+      return ids;
+    }),
   ]);
   const npcs_spawned      = unique(extractInts(new RegExp(RE_NPC_SPAWN.source), src));
   const spells_cast       = unique(extractInts(new RegExp(RE_SPELL.source), src));
