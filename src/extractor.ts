@@ -386,11 +386,12 @@ function extractInteractions(src: string): Interaction[] {
    *   (e.g. HasItem, faction checks) are recursed into so nested keyword branches
    *   each produce their own interaction with correct trigger words.
    */
-  function processBranches(event: string, branches: RawBranch[]): void {
+  function processBranches(event: string, branches: RawBranch[], gateItems: number[] = []): void {
     for (const branch of branches) {
       if (branch.condition === '__else__') {
+        // else branch: player lacks the outer gate item, so clear inherited gateItems
         const sub = extractBranches(branch.body);
-        if (sub.length > 0) processBranches(event, sub);
+        if (sub.length > 0) processBranches(event, sub, []);
         continue;
       }
 
@@ -400,12 +401,21 @@ function extractInteractions(src: string): Interaction[] {
       const condHasCheckTurnIn = /check_turn_in/.test(branch.condition);
 
       if (!condHasKeyword && !condHasCheckTurnIn) {
-        // Outer gate (HasItem, faction, etc.) — recurse into body for nested branches
+        // Outer gate (HasItem, faction, etc.) — collect HasItem IDs and recurse
+        const hasItemRe = /HasItem\s*\(\s*(\d{4,6})/g;
+        const newGateItems: number[] = [];
+        let gm: RegExpExecArray | null;
+        while ((gm = hasItemRe.exec(branch.condition)) !== null) {
+          newGateItems.push(parseInt(gm[1], 10));
+        }
         const sub = extractBranches(branch.body);
-        if (sub.length > 0) { processBranches(event, sub); continue; }
+        if (sub.length > 0) {
+          processBranches(event, sub, [...gateItems, ...newGateItems]);
+          continue;
+        }
       }
 
-      const ia = buildInteraction(event, branch.condition, branch.body);
+      const ia = buildInteraction(event, branch.condition, branch.body, gateItems);
       if (ia.trigger_keywords.length || ia.trigger_items.length || ia.responses.length) {
         interactions.push(ia);
       }
