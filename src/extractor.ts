@@ -84,7 +84,9 @@ const RE_ITEM_REQ      = /(?:HasItem|CheckHandin|handin_check)\s*\(\s*(?:[^,)]*,
 const RE_CHECK_TURN_IN = /check_turn_in\s*\([^{]*\{([^}]*)\}/g;
 const RE_ITEM_SUMMON   = /(?:SummonCursorItem|AddItem)\s*\(\s*(\d{4,6})/g;
 // QuestReward(npc, copper, silver, gold, platinum, item_id, exp) — capture item_id (arg 6)
-const RE_QUEST_REWARD  = /QuestReward\s*\(\s*[^,]+,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*(\d{4,6})/g;
+const RE_QUEST_REWARD       = /QuestReward\s*\(\s*[^,]+,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*(\d{4,6})/g;
+// QuestReward(npc, {items = {id1, id2, ...}}) — table form
+const RE_QUEST_REWARD_TABLE = /QuestReward\s*\(\s*[^,]+,\s*\{[^}]*items\s*=\s*\{([^}]+)\}/g;
 const RE_NPC_SPAWN     = /eq\.(?:spawn2|unique_spawn|quest_entity)\s*\(\s*(\d{3,6})/g;
 const RE_SPELL         = /CastSpell\s*\(\s*(\d{1,6})/g;
 const RE_FACTION       = /Faction\s*\(\s*[^,]+,\s*(\d{1,6})/g;
@@ -216,7 +218,7 @@ function factionChangesFrom(src: string): FactionChange[] {
 
 function rewardsFrom(src: string): QuestReward[] {
   const rewards: QuestReward[] = [];
-  // QuestReward(npc, copper, silver, gold, platinum, item_id, exp)
+  // Positional form: QuestReward(npc, copper, silver, gold, platinum, item_id, exp)
   const re = /QuestReward\s*\(\s*[^,]+,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
@@ -229,6 +231,15 @@ function rewardsFrom(src: string): QuestReward[] {
       item_id:  itemId > 0 ? itemId : null,
       exp:      parseInt(m[6], 10),
     });
+  }
+  // Table form: QuestReward(npc, {items = {id1, id2, ...}})
+  const tableRe = new RegExp(RE_QUEST_REWARD_TABLE.source, 'g');
+  while ((m = tableRe.exec(src)) !== null) {
+    const itemRe = /(\d{4,6})/g;
+    let item: RegExpExecArray | null;
+    while ((item = itemRe.exec(m[1])) !== null) {
+      rewards.push({ copper: 0, silver: 0, gold: 0, platinum: 0, item_id: parseInt(item[1], 10), exp: 0 });
+    }
   }
   return rewards;
 }
@@ -350,7 +361,7 @@ export function parseLuaQuest(
 
   [
     RE_KEYWORD_FINDI, RE_KEYWORD_EQ, RE_DIALOG, RE_ITEM_REQ, RE_CHECK_TURN_IN,
-    RE_ITEM_SUMMON, RE_QUEST_REWARD, RE_NPC_SPAWN, RE_SPELL, RE_FACTION,
+    RE_ITEM_SUMMON, RE_QUEST_REWARD, RE_QUEST_REWARD_TABLE, RE_NPC_SPAWN, RE_SPELL, RE_FACTION,
   ].forEach(countMatches);
 
   const events            = unique(extractStrings(new RegExp(RE_EVENT.source), src));
@@ -366,6 +377,7 @@ export function parseLuaQuest(
   const items_rewarded    = unique([
     ...extractInts(new RegExp(RE_ITEM_SUMMON.source), src),
     ...extractInts(new RegExp(RE_QUEST_REWARD.source), src),
+    ...rewardsFrom(src).filter(r => r.item_id !== null).map(r => r.item_id as number),
   ]);
   const npcs_spawned      = unique(extractInts(new RegExp(RE_NPC_SPAWN.source), src));
   const spells_cast       = unique(extractInts(new RegExp(RE_SPELL.source), src));
