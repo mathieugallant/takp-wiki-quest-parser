@@ -318,7 +318,7 @@ function factionReqFrom(text: string): number | null {
  * (event_say style).  In the latter case the body is sub-split to separate
  * success responses from fail responses.
  */
-function buildInteraction(event: string, condition: string, body: string): Interaction {
+function buildInteraction(event: string, condition: string, body: string, items_required_gate: number[] = []): Interaction {
   const trigger_keywords = unique(
     extractStrings(new RegExp(RE_KEYWORD_FINDI.source), condition)
       .concat(extractStrings(new RegExp(RE_KEYWORD_EQ.source), condition))
@@ -353,6 +353,7 @@ function buildInteraction(event: string, condition: string, body: string): Inter
     event,
     trigger_keywords,
     trigger_items,
+    items_required_gate,
     faction_required,
     responses:       dialogsFrom(successBody),
     responses_fail,

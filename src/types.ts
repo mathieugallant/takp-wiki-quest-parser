@@ -26,6 +26,8 @@ export interface Interaction {
   trigger_keywords: string[];
   /** items the player must turn in to trigger this branch (from check_turn_in), with required count */
   trigger_items: TriggerItem[];
+  /** items the player must have on their person to enter this dialog branch (from HasItem gate), no turn-in */
+  items_required_gate: number[];
   /** minimum faction value required, or null if not gated */
   faction_required: number | null;
   /** NPC dialog lines on success (or unconditional) */
