@@ -22,7 +22,10 @@ function extractStrings(pattern: RegExp, src: string): string[] {
   let m: RegExpExecArray | null;
   const re = new RegExp(pattern.source, 'g');
   while ((m = re.exec(src)) !== null) {
-    if (m[1]) strs.push(m[1].trim());
+    // Some patterns use two alternating capture groups (e.g. double- vs single-quoted);
+    // pick the first group that matched.
+    const val = m.slice(1).find((s) => s !== undefined);
+    if (val) strs.push(val.trim());
   }
   return strs;
 }
@@ -76,7 +79,8 @@ function structuralText(rawLine: string): string {
 // ─── Flat patterns ────────────────────────────────────────────────────────────
 
 const RE_EVENT         = /function\s+(event_\w+)\s*\(/g;
-const RE_KEYWORD_FINDI = /message:find[iI]?\s*\(\s*["']([^"']+)["']/g;
+// Two-group alternation: double-quoted (allows apostrophes) vs single-quoted
+const RE_KEYWORD_FINDI = /message:find[iI]?\s*\(\s*(?:"([^"]+)"|'([^']+)')/g;
 const RE_KEYWORD_EQ    = /message\s*==\s*["']([^"']+)["']/g;
 // Two-group alternation so apostrophes inside double-quoted strings are handled correctly.
 const RE_DIALOG        = /(?:self:(?:Say|Emote|Shout|Roar|QuestSay)|eq\.say)\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')/g;
