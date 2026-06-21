@@ -373,12 +373,34 @@ function rewardsFrom(src: string): QuestReward[] {
       return isNaN(n) ? 0 : n;
     }
 
-    // Table form: QuestReward(npc, {items = {...}})
+    // Named-field table form: QuestReward(npc, {copper = N, silver = N, gold = N, platinum = N, exp = N, item = id, items = {id,...}})
     if (args.length === 2 && args[1].startsWith('{')) {
-      const itemRe = /(\d{4,6})/g;
-      let it: RegExpExecArray | null;
-      while ((it = itemRe.exec(args[1])) !== null) {
-        rewards.push({ copper: 0, silver: 0, gold: 0, platinum: 0, item_id: parseInt(it[1], 10), item_choices: null, exp: 0 });
+      const tableStr = args[1];
+
+      function namedInt(field: string): number {
+        const m = tableStr.match(new RegExp(`\\b${field}\\s*=\\s*(\\d+)`));
+        return m ? parseInt(m[1], 10) : 0;
+      }
+
+      const tCopper   = namedInt('copper');
+      const tSilver   = namedInt('silver');
+      const tGold     = namedInt('gold');
+      const tPlatinum = namedInt('platinum');
+      const tExp      = namedInt('exp');
+
+      // items = {id1, id2, ...} — item choices
+      const itemsMatch = tableStr.match(/\bitems\s*=\s*\{([^}]+)\}/);
+      if (itemsMatch) {
+        const choices = itemsMatch[1]
+          .split(',')
+          .map((s) => parseInt(s.trim(), 10))
+          .filter((n) => !isNaN(n) && n > 0);
+        rewards.push({ copper: tCopper, silver: tSilver, gold: tGold, platinum: tPlatinum, item_id: null, item_choices: choices.length > 0 ? choices : null, exp: tExp });
+      } else {
+        // item = id — single item (must be 4–6 digits to avoid matching named numeric fields like exp)
+        const itemMatch = tableStr.match(/\bitem\s*=\s*(\d{4,6})\b/);
+        const tItemId = itemMatch ? parseInt(itemMatch[1], 10) : null;
+        rewards.push({ copper: tCopper, silver: tSilver, gold: tGold, platinum: tPlatinum, item_id: tItemId, item_choices: null, exp: tExp });
       }
       continue;
     }
