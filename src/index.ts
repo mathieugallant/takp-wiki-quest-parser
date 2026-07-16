@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { glob } from 'glob';
-import { parseLuaQuest } from './extractor.js';
+import { parseLuaQuest } from './ast-extractor.js';
 import type { QuestData, QuestIndex } from './types.js';
 
 // ──────────────────────────────────────────────
