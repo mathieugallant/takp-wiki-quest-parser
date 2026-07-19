@@ -208,6 +208,40 @@ function childBodies(stmt: Statement): Statement[][] {
   }
 }
 
+// ─── count_handed_item source extraction ────────────────────────────────────
+
+/**
+ * Scan a statement list for assignments of the form:
+ *   local count = something.count_handed_item(npc, trade, {item_ids}, required_count)
+ * and return a map of variable name → TriggerItem[].  Used to resolve
+ * conditions like `if(count > 0)` back to their source items.
+ */
+function extractCountHandedItemSources(stmts: Statement[]): Map<string, TriggerItem[]> {
+  const map = new Map<string, TriggerItem[]>();
+  for (const stmt of stmts) {
+    if (stmt.type !== 'LocalStatement') continue;
+    const ls = stmt as LocalStatement;
+    for (let i = 0; i < ls.init.length; i++) {
+      const init = ls.init[i];
+      if (init.type !== 'CallExpression') continue;
+      const call = init as CallExpression;
+      if (memberMethod(call.base) !== 'count_handed_item') continue;
+      // count_handed_item(npc, trade, {items}, required_count)
+      const itemsArg = call.arguments[2];
+      const countArg = call.arguments[3];
+      if (!itemsArg || itemsArg.type !== 'TableConstructorExpression') continue;
+      const reqCount = countArg ? (numValue(countArg) ?? 1) : 1;
+      const itemIds = tableValues(itemsArg as TableConstructorExpression);
+      if (itemIds.length === 0) continue;
+      const items: TriggerItem[] = itemIds.map((id) => ({ item_id: id, count: reqCount }));
+      if (ls.variables[i]) {
+        map.set(ls.variables[i].name, items);
+      }
+    }
+  }
+  return map;
+}
+
 // ─── Condition analysis ───────────────────────────────────────────────────────
 
 interface ConditionInfo {
@@ -241,17 +275,21 @@ function mergeCondInfo(a: ConditionInfo, b: ConditionInfo): ConditionInfo {
  * Walk a condition expression and extract trigger/gate/faction data.
  * All branches of `and`/`or` are explored so both sides of a compound
  * condition are captured.
+ *
+ * `varItemSources` maps local variable names to the TriggerItem[] that was
+ * captured by extractCountHandedItemSources, enabling conditions like
+ * `if(count > 0)` to be resolved back to their source items.
  */
-function analyzeCondition(expr: Expression): ConditionInfo {
+function analyzeCondition(expr: Expression, varItemSources?: Map<string, TriggerItem[]>): ConditionInfo {
   if (expr.type === 'LogicalExpression') {
     const log = expr as LogicalExpression;
-    return mergeCondInfo(analyzeCondition(log.left), analyzeCondition(log.right));
+    return mergeCondInfo(analyzeCondition(log.left, varItemSources), analyzeCondition(log.right, varItemSources));
   }
 
   if (expr.type === 'UnaryExpression') {
     // `not expr` — still extract any items referenced (for `not HasItem(x)`)
     const u = expr as { type: 'UnaryExpression'; operator: string; argument: Expression };
-    return analyzeCondition(u.argument);
+    return analyzeCondition(u.argument, varItemSources);
   }
 
   if (expr.type === 'BinaryExpression') {
@@ -259,6 +297,15 @@ function analyzeCondition(expr: Expression): ConditionInfo {
     // GetFactionValue(...) >= N  or  N <= GetFactionValue(...)
     const { operator, left, right } = bin;
     if (operator === '>=' || operator === '>' || operator === '<=' || operator === '<') {
+      // count > 0 / count >= 1  where `count` came from count_handed_item()
+      if (varItemSources && (operator === '>' || operator === '>=') && left.type === 'Identifier') {
+        const items = varItemSources.get((left as Identifier).name);
+        if (items) {
+          const info = emptyCondInfo();
+          info.triggerItems = [...items];
+          return info;
+        }
+      }
       // left is GetFactionValue call
       if (left.type === 'CallExpression' && memberMethod((left as CallExpression).base) === 'GetFactionValue') {
         const n = numValue(right);
@@ -558,18 +605,19 @@ function processClause(
   event: string,
   clause: AnyClause,
   inheritedGateItems: number[],
+  varItemSources?: Map<string, TriggerItem[]>,
 ): Interaction[] {
   if (clause.type === 'ElseClause') {
     // else branch: recurse into any nested if-statements; no condition of its own
-    return processStatements(event, clause.body, []);
+    return processStatements(event, clause.body, [], varItemSources);
   }
 
-  const condInfo = analyzeCondition(clause.condition);
+  const condInfo = analyzeCondition(clause.condition, varItemSources);
 
   if (isOuterGate(condInfo)) {
     // Outer gate — collect HasItem gate items and recurse into body
     const gateItems = unique([...inheritedGateItems, ...condInfo.gateItems]);
-    return processStatements(event, clause.body, gateItems);
+    return processStatements(event, clause.body, gateItems, varItemSources);
   }
 
   // This clause is a real trigger branch — build one Interaction
@@ -604,7 +652,7 @@ function processClause(
   }
 
   // Recurse into nested if-statements within body for additional interactions
-  const nestedInteractions = processStatements(event, clause.body, unique([...inheritedGateItems, ...condInfo.gateItems]));
+  const nestedInteractions = processStatements(event, clause.body, unique([...inheritedGateItems, ...condInfo.gateItems]), varItemSources);
 
   const self: Interaction = {
     event,
@@ -644,17 +692,25 @@ function processStatements(
   event: string,
   stmts: Statement[],
   inheritedGateItems: number[],
+  varItemSources?: Map<string, TriggerItem[]>,
 ): Interaction[] {
+  // Build local count_handed_item sources from this scope and merge with inherited
+  const localSources = extractCountHandedItemSources(stmts);
+  const effectiveSources: Map<string, TriggerItem[]> | undefined =
+    localSources.size > 0
+      ? new Map([...(varItemSources ?? []), ...localSources])
+      : varItemSources;
+
   const interactions: Interaction[] = [];
   for (const stmt of stmts) {
     if (stmt.type === 'IfStatement') {
       for (const clause of (stmt as IfStatement).clauses) {
-        interactions.push(...processClause(event, clause as AnyClause, inheritedGateItems));
+        interactions.push(...processClause(event, clause as AnyClause, inheritedGateItems, effectiveSources));
       }
     } else {
       // Recurse into loops/do-blocks
       for (const body of childBodies(stmt)) {
-        interactions.push(...processStatements(event, body, inheritedGateItems));
+        interactions.push(...processStatements(event, body, inheritedGateItems, effectiveSources));
       }
     }
   }

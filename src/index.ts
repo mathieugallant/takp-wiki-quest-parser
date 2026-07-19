@@ -17,6 +17,7 @@ function arg(flag: string, fallback: string): string {
 
 const questsDir = path.resolve(arg('--quests', './quests'));
 const outDir = path.resolve(arg('--out', './data/quests'));
+const singleFile = arg('--file', '');
 
 // ──────────────────────────────────────────────
 // Helpers
@@ -38,6 +39,22 @@ async function writeJson(filePath: string, data: unknown) {
 // ──────────────────────────────────────────────
 
 async function main() {
+  // ── Single-file debug mode ──────────────────────────────────────────────
+  if (singleFile) {
+    const absPath = path.resolve(singleFile);
+    const src = await readFile(absPath, 'utf-8');
+    const rel = path.relative(questsDir, absPath);
+    const parts = rel.split(path.sep);
+    const zone = parts.length >= 2 ? parts[0] : 'unknown';
+    const isEncounter = parts.length === 3 && parts[1] === 'encounters';
+    const npcFile = isEncounter ? parts[2] : (parts[1] ?? path.basename(absPath));
+    const npcName = npcFile.replace(/\.lua$/i, '');
+    const data: QuestData = parseLuaQuest(src, zone, npcName, rel, isEncounter);
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+
+  // ── Bulk mode ───────────────────────────────────────────────────────────
   console.log(`Quest parser starting...`);
   console.log(`  quests dir : ${questsDir}`);
   console.log(`  output dir : ${outDir}`);
