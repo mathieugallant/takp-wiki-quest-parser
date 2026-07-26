@@ -242,6 +242,67 @@ function extractCountHandedItemSources(stmts: Statement[]): Map<string, TriggerI
   return map;
 }
 
+/**
+ * Detect whether an IfStatement follows the pattern:
+ *   if check_turn_in(...) then varName = N
+ *   elseif check_turn_in(...) then varName = M
+ *   ...
+ * Returns the variable name if the pattern matches, else null.
+ */
+function detectCheckTurnInAssignment(ifStmt: IfStatement): string | null {
+  let varName: string | null = null;
+  for (const clause of ifStmt.clauses) {
+    if (clause.type === 'ElseClause') continue; // ignore else without condition
+    const cc = clause as ClauseWithCondition;
+    // Condition must resolve to check_turn_in (triggerItems populated)
+    const condInfo = analyzeCondition(cc.condition);
+    if (condInfo.triggerItems.length === 0) return null;
+    // Body must be exactly one assignment: varName = NumericLiteral
+    if (cc.body.length !== 1) return null;
+    const bodyStmt = cc.body[0];
+    if (bodyStmt.type !== 'AssignmentStatement') return null;
+    const assign = bodyStmt as AssignmentStatement;
+    if (assign.variables.length !== 1 || assign.init.length !== 1) return null;
+    const lhs = assign.variables[0];
+    if (lhs.type !== 'Identifier') return null;
+    if (assign.init[0].type !== 'NumericLiteral') return null;
+    const thisVar = (lhs as Identifier).name;
+    if (varName === null) varName = thisVar;
+    else if (varName !== thisVar) return null;
+  }
+  return varName;
+}
+
+/**
+ * Scan a statement list for if/elseif chains where each conditional branch:
+ *   - tests check_turn_in(...) as its condition
+ *   - assigns a numeric literal to the same variable
+ * Returns a map of variable name → TriggerItem[] (minimum count across branches).
+ */
+function extractCheckTurnInVarSources(stmts: Statement[]): Map<string, TriggerItem[]> {
+  const map = new Map<string, TriggerItem[]>();
+  for (const stmt of stmts) {
+    if (stmt.type !== 'IfStatement') continue;
+    const ifStmt = stmt as IfStatement;
+    const varName = detectCheckTurnInAssignment(ifStmt);
+    if (!varName) continue;
+    // Collect item IDs from all check_turn_in conditions, keeping minimum count
+    const minCounts = new Map<number, number>();
+    for (const clause of ifStmt.clauses) {
+      if (clause.type === 'ElseClause') continue;
+      const condInfo = analyzeCondition((clause as ClauseWithCondition).condition);
+      for (const ti of condInfo.triggerItems) {
+        const existing = minCounts.get(ti.item_id);
+        minCounts.set(ti.item_id, existing === undefined ? ti.count : Math.min(existing, ti.count));
+      }
+    }
+    if (minCounts.size > 0) {
+      map.set(varName, [...minCounts.entries()].map(([item_id, count]) => ({ item_id, count })));
+    }
+  }
+  return map;
+}
+
 // ─── Condition analysis ───────────────────────────────────────────────────────
 
 interface ConditionInfo {
@@ -630,7 +691,10 @@ function processClause(
   let responsesFail: string[] = [];
 
   // If there's a nested IfStatement at the top of the body that contains a
-  // GetFactionValue check, pull it out as the faction gate
+  // GetFactionValue check, pull it out as the faction gate.  Capture the full
+  // BodyResult (not just dialogs) so rewards/faction_changes inside the nested
+  // success branch (e.g. inside a repeat loop) are propagated to self.
+  let nestedBodyResult: BodyResult | null = null;
   for (const stmt of clause.body) {
     if (stmt.type === 'IfStatement') {
       const nested = stmt as IfStatement;
@@ -641,7 +705,8 @@ function processClause(
             nestedCond.keywords.length === 0 &&
             nestedCond.triggerItems.length === 0) {
           factionRequired = nestedCond.factionRequired;
-          responsesSuccess = analyzeBody((firstClause as ClauseWithCondition).body).dialogs;
+          nestedBodyResult = analyzeBody((firstClause as ClauseWithCondition).body);
+          responsesSuccess = nestedBodyResult.dialogs;
           // else/fail branch
           const elseCl = nested.clauses.find((c) => c.type === 'ElseClause') as ElseClause | undefined;
           if (elseCl) responsesFail = analyzeBody(elseCl.body).dialogs;
@@ -650,6 +715,10 @@ function processClause(
       }
     }
   }
+
+  // Merge the nested faction-check body into the effective body result so that
+  // rewards/faction_changes buried inside the faction-gated block are captured.
+  const effectiveBody = nestedBodyResult ? mergeBodyResult(bodyResult, nestedBodyResult) : bodyResult;
 
   // Recurse into nested if-statements within body for additional interactions
   const nestedInteractions = processStatements(event, clause.body, unique([...inheritedGateItems, ...condInfo.gateItems]), varItemSources);
@@ -662,19 +731,25 @@ function processClause(
     faction_required: factionRequired,
     responses: unique(responsesSuccess),
     responses_fail: unique(responsesFail),
-    faction_changes: bodyResult.factionChanges,
-    rewards: bodyResult.rewards,
-    items_given: bodyResult.itemsGiven,
-    npcs_spawned: bodyResult.npcsSpawned,
-    spells_cast: bodyResult.spellsCast,
+    faction_changes: effectiveBody.factionChanges,
+    rewards: effectiveBody.rewards,
+    items_given: effectiveBody.itemsGiven,
+    npcs_spawned: effectiveBody.npcsSpawned,
+    spells_cast: effectiveBody.spellsCast,
   };
 
-  const hasContent =
-    self.trigger_keywords.length > 0 ||
-    self.trigger_items.length > 0 ||
+  // An interaction requires at least one observable effect (response, reward,
+  // faction change, item given, etc.).  Trigger-only interactions (e.g. a
+  // check_turn_in branch that merely sets a counter variable) are excluded.
+  const hasEffect =
     self.responses.length > 0 ||
     self.rewards.length > 0 ||
-    self.faction_changes.length > 0;
+    self.faction_changes.length > 0 ||
+    self.items_given.length > 0 ||
+    self.npcs_spawned.length > 0 ||
+    self.spells_cast.length > 0;
+
+  const hasContent = self.trigger_keywords.length > 0 || hasEffect;
 
   const result: Interaction[] = hasContent ? [self] : [];
   // Add nested only if they are not already captured by self (avoid duplication)
@@ -694,8 +769,12 @@ function processStatements(
   inheritedGateItems: number[],
   varItemSources?: Map<string, TriggerItem[]>,
 ): Interaction[] {
-  // Build local count_handed_item sources from this scope and merge with inherited
-  const localSources = extractCountHandedItemSources(stmts);
+  // Build variable→TriggerItem sources for this scope:
+  //  • local count = item_lib.count_handed_item(...)  (Captain_Hazran pattern)
+  //  • if check_turn_in(...) then scalp = N end       (Captain_Ashlan pattern)
+  const countHandedSources = extractCountHandedItemSources(stmts);
+  const checkTurnInSources = extractCheckTurnInVarSources(stmts);
+  const localSources = new Map([...countHandedSources, ...checkTurnInSources]);
   const effectiveSources: Map<string, TriggerItem[]> | undefined =
     localSources.size > 0
       ? new Map([...(varItemSources ?? []), ...localSources])
